@@ -117,10 +117,7 @@ gg   = lambda x: np.abs(x)**(1/3)  * np.sign(x)
 ggg  = lambda x: np.abs(x)**0.2    * np.sign(x)
 gggg = lambda x: np.abs(x)**(1/11) * np.sign(x)
 
-# =========================================================
-# 1/2/3-ary function sets (your version, kept mostly)
-#  - each must take/return 1D arrays of same length
-# =========================================================
+# 1/2/3-ary function sets
 funcs_1 = [
     lambda x: x + 1,
     lambda x: x * 2,
@@ -134,6 +131,7 @@ funcs_1 = [
     lambda x: np.fft.fft(x).imag / x.shape[0],
     lambda x: TT(x),
     lambda x: TT2(x),
+    lambda x: TT2(TT2(x)),
     lambda x: TT(TT(x)),
     lambda x: TT(TT(TT(TT(x)))),
     lambda x: x * 0.5,
@@ -142,18 +140,30 @@ funcs_1 = [
     lambda x: np.concatenate((x[1:], x[:1])),
     lambda x: np.concatenate((x[-2:], x[:-2])),
     lambda x: np.concatenate((x[2:], x[:2])),
-    lambda x: np.concatenate((x[:-4], x[:-4])),
+    lambda x: np.concatenate((x[-4:], x[:-4])),
     lambda x: np.concatenate((x[4:], x[:4])),
-    lambda x: np.concatenate((x[:-8], x[:-8])),
+    lambda x: np.concatenate((x[-8:], x[:-8])),
     lambda x: np.concatenate((x[8:], x[:8])),
-    lambda x: np.concatenate((x[:-16], x[:-16])),
+    lambda x: np.concatenate((x[-16:], x[:-16])),
     lambda x: np.concatenate((x[16:], x[:16])),
-    lambda x: np.concatenate((x[:-32], x[:-32])),
+    lambda x: np.concatenate((x[-32:], x[:-32])),
     lambda x: np.concatenate((x[32:], x[:32])),
+    lambda x: np.concatenate((x[::2], x[1::2])),
+    lambda x: np.concatenate((x[1::2], x[::2])),
+    lambda x: np.concatenate((x[::2], x[::2])),
+    lambda x: np.concatenate((x[1::2], x[1::2])),
     lambda x: np.mean(x, dtype=np.float64) + x * 0,
+    lambda x: np.std(x, dtype=np.float64) + x * 0,
+    lambda x: x - np.mean(x, dtype=np.float64),
+    lambda x: x + np.mean(x, dtype=np.float64),
+    lambda x: x * np.mean(x, dtype=np.float64),
+    lambda x: x * np.std(x, dtype=np.float64),
     lambda x: (np.log(np.std(x) + 1e-12)).astype(np.float64) + x * 0,
     lambda x: x * 0.1,
+    lambda x: x * 0.01,
+    lambda x: x * 0.001,
     lambda x: (x - np.mean(x)) / (np.std(x) + 1e-12),
+    lambda x: x / np.mean(x ** 2) ** 0.5,
     lambda x: x * 10,
     lambda x: x ** 3,
     lambda x: np.sin(x * np.pi),
@@ -164,7 +174,7 @@ funcs_1 = [
     lambda x: np.tanh(x),
     lambda x: x * -0.01,
     lambda x: x * 0.01,
-    lambda x: np.fft.ifft(np.abs(np.fft.fft(x + 0j)) ** 2).real,
+    lambda x: np.fft.irfft(np.abs(np.fft.rfft(x)) ** 2),
     lambda x: np.cumsum(x) / (np.arange(x.size, dtype=np.float64)+1.0),
     lambda x: np.cumsum(x),
     lambda x: np.cumprod(x / np.sqrt(np.mean(x ** 2) + 1e-12)),
@@ -184,13 +194,24 @@ funcs_2 = [
     lambda x, y: x / (np.abs(y) + 1e-12),
     lambda x, y: (x - y) ** 2,
     lambda x, y: (x + y) / 2,
+    lambda x, y: x * 0.1 + y * 0.9,
+    lambda x, y: x * 0.9 + y * 0.1,
+    lambda x, y: x * 1.5 + y * -0.5,
+    lambda x, y: x * 1.1 + y * -0.1,
+    lambda x, y: x * -0.1 + y * 1.1,
+    lambda x, y: x * -0.5 + y * 1.5,
     lambda x, y: np.sqrt(x ** 2 + y ** 2),
-    lambda x, y: np.fft.ifft(np.fft.fft(x) * np.fft.fft(y) / x.shape[0]).real,
-    lambda x, y: np.fft.ifft(np.fft.fft(x) ** 2 / (np.fft.fft(y) + 1e-12)).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(x) * np.fft.rfft(y) / x.shape[0]).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(x) * np.conj(np.fft.rfft(y)) / x.shape[0]).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(y) * np.conj(np.fft.rfft(x)) / x.shape[0]).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(x) ** 2 / (np.fft.rfft(y) + 1e-12)).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(x).real + np.fft.rfft(y).imag * 1j).real,
+    lambda x, y: np.fft.irfft(np.fft.rfft(y).real + np.fft.rfft(x).imag * 1j).real,
     lambda x, y: np.take(x, np.argsort(y)),
     lambda x, y: np.take(TT(np.take(x, np.argsort(y))), np.argsort(np.argsort(y))),
     lambda x, y: np.maximum(x, y),
     lambda x, y: np.minimum(x, y),
+    lambda x, y: np.concatenate((x[::2], y[1::2])),
     lambda x, y: np.sin(x * np.pi * y),
     lambda x, y: attn_poly3_fast(x, y, y),
     lambda x, y: gg(attn_poly3_fast(x**3, y**3, y**3)),
@@ -205,10 +226,14 @@ funcs_3 = [
     lambda x, y, z: (x + y + z) / 3,
     lambda x, y, z: np.sign(x * y * z) * np.abs(x * y * z) ** (1/3),
     lambda x, y, z: x + y - z,
+    lambda x, y, z: x + (y - z) * 0.5,
     lambda x, y, z: np.sqrt(x ** 2 + y ** 2 + z ** 2),
-    lambda x, y, z: np.fft.ifft(np.fft.fft(x) * np.fft.fft(y) / (np.fft.fft(z + 1e-12))).real,
-    lambda x, y, z: np.fft.ifft(np.fft.fft(x) * np.fft.fft(np.tanh(y)) / (np.fft.fft(np.tanh(z)))).real,
-    lambda x, y, z: np.fft.ifft(np.fft.fft(x) * np.fft.fft(np.tanh(y)+1) / (np.fft.fft(np.tanh(z)+1))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.conj(np.fft.rfft(y) / (np.fft.rfft(z + 1e-12)))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.conj(np.fft.rfft(np.tanh(y)) / (np.fft.rfft(np.tanh(z))))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.conj(np.fft.rfft(np.tanh(y)+1) / (np.fft.rfft(np.tanh(z)+1)))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.fft.rfft(y) / (np.fft.rfft(z + 1e-12))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.fft.rfft(np.tanh(y)) / (np.fft.rfft(np.tanh(z)))).real,
+    lambda x, y, z: np.fft.irfft(np.fft.rfft(x) * np.fft.rfft(np.tanh(y)+1) / (np.fft.rfft(np.tanh(z)+1))).real,
     lambda x, y, z: attn_poly3_fast(x**3, y**3, z),
     lambda x, y, z: gg(attn_poly3_fast(x, y**3, z)),
     lambda x, y, z: attn_poly3_fast(x, y, z),
@@ -221,6 +246,9 @@ funcs_3 = [
     lambda x, y, z: gggg(attn_poly11_fast(x**11, y**11, z**11)),
     lambda x, y, z: attn_poly11_fast(x**11, y**11, z),
     lambda x, y, z: gggg(attn_poly11_fast(x, y**11, z)),
+    lambda x, y, z: np.fft.irfft(attn_poly3_fast(np.fft.rfft(x), np.fft.rfft(y), np.fft.rfft(z))),
+    lambda x, y, z: np.fft.irfft(attn_poly5_fast(np.fft.rfft(x), np.fft.rfft(y), np.fft.rfft(z))),
+    lambda x, y, z: np.fft.irfft(attn_poly11_fast(np.fft.rfft(x), np.fft.rfft(y), np.fft.rfft(z))),
     lambda x, y, z: np.take(np.take(x, np.argsort(y)), np.argsort(np.argsort(z))),
     lambda x, y, z: np.take(TT(np.take(x, np.argsort(y))), np.argsort(np.argsort(z))),
     lambda x, y, z: np.take(TT(TT(np.take(x, np.argsort(y)))), np.argsort(np.argsort(z))),
@@ -835,7 +863,7 @@ def batch_exec_structured_logits_1d(
 def safe_corr(a, b):
     a = np.asarray(a, dtype=np.float64).ravel()
     b = np.asarray(b, dtype=np.float64).ravel()
-    return np.abs(spearmanr(a, b).correlation) #* chatterjee_correlation(a, b).max(0) * chatterjee_correlation(b, a).max(0)
+    return np.abs(np.corrcoef(a, b)[0, 1]) * np.abs(spearmanr(a, b).correlation) * chatterjee_correlation(a, b).max(0) * chatterjee_correlation(b, a).max(0)
     """if a.size < 2:
         return 0.0
     sa = np.std(a); sb = np.std(b)
@@ -891,6 +919,11 @@ history = []
 
 import tqdm
 
+def MAD(errors):
+    med = np.median(errors)
+    return np.median(np.abs(errors - med))
+
+
 # =========================
 # Minimal GA loop (tiny) to verify "runs"
 # =========================
@@ -934,7 +967,7 @@ def run_demo(
         # stack population
         G1 = np.stack(GENES1, axis=0)  # (N,MODELLEN,3)
         G2 = np.stack(GENES2, axis=0)  # (N,MODELLEN)
-        G3 = np.stack(np.zeros_like(GENES3), axis=0)  # (N,MODELLEN)
+        G3 = np.zeros_like(np.stack(GENES3, axis=0))  # (N,MODELLEN)
 
         node_structs, struct_type, struct_func, struct_ch1, struct_ch2, struct_ch3, struct_alpha, idxs, pairs = \
             precompute_structs_numba(G1, G2, G3, len_i0, len_i1, len_i2, num_inputs=num_inputs, last_k=last_k)
@@ -974,7 +1007,7 @@ def run_demo(
         if(oldacc[step % (dataset // samples)] - losses[best] > 1e-12):
             elites.append((deepcopy(GENES1[best]), deepcopy(GENES2[best]), deepcopy(GENES3[best]), float(losses[best])))
             oldacc[step % (dataset // samples)] = losses[best]
-        print(f"{step}, {-losses[best]}, {idhk}")
+        print(f"{step}, {-losses[best]}, {-np.sum(oldacc) / min(step+1, dataset//samples)}, {len(elites)}")
 
         # produce next gen: elitism + crossover/mutation (very simple)
         new1, new2, new3 = [], [], []
@@ -987,7 +1020,7 @@ def run_demo(
         new1.extend([_[0] for _ in elites[-6:]])
         new2.extend([_[1] for _ in elites[-6:]])
         new3.extend([_[2] for _ in elites[-6:]])
-        for _ in range(6):
+        for _ in range(12):
             r = np.random.randint(0, len(elites))
             new1.append(deepcopy(elites[r][0]))
             new2.append(deepcopy(elites[r][1]))
@@ -1008,12 +1041,12 @@ def run_demo(
 
             a = 1#np.random.uniform(0, 1) ** 2
             # mutate some refs / ops / alpha
-            if np.random.rand() < 0.75 * a:
+            if np.random.rand() < 0.25 * a:
                 for _ in range(np.random.randint(2, 2**np.random.randint(2, int(np.log2(MODELLEN))))):
                     pos = np.random.randint(num_inputs, MODELLEN)
                     which = np.random.randint(0, 3)
                     c1[pos, which] = np.random.randint(0, pos)  # ensure DAG
-            if np.random.rand() < 0.75 * a:
+            if np.random.rand() < 0.25 * a:
                 for _ in range(np.random.randint(2, 2**np.random.randint(2, int(np.log2(MODELLEN))))):
                     pos = np.random.randint(num_inputs, MODELLEN)
                     c2[pos] = np.random.choice(len_i0 + len_i1 + len_i2, p=T)
@@ -1065,5 +1098,5 @@ def run_demo(
 
 # 実行例（まず「ちゃんと動くか」を見る用）
 if __name__ == "__main__":
-    elites = run_demo(MODELLEN=4096, POP=128, iters=10000, samples=1024, last_k=1, change_every=1)
+    elites = run_demo(MODELLEN=8192, POP=256, iters=10000, samples=2048, last_k=1, change_every=1)
     print("done. best elite corr:", max(e[-1] for e in elites))

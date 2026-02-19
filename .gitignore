@@ -1,1 +1,10 @@
 __pycache__/*.*
+
+# Added by cargo
+
+/target
+**/*.npz
+**/*.o
+**/*.gz
+**/*.so
+**/*.bin

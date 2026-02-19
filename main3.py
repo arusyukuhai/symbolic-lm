@@ -1,288 +1,205 @@
-import torch
-import torch.nn as nn
-import tqdm
 import numpy as np
+import cv2
+import time
+import gc
+import tqdm
+import torchvision
+from numba import njit
+import warnings
+import matplotlib.pyplot as plt
 
-class FourierScaledDotProductAttention(nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.d_k = size
-        self.q_imag = nn.Parameter(torch.zeros(size))
-        self.q_real = nn.Parameter(torch.ones(size))
-        self.k_imag = nn.Parameter(torch.zeros(size))
-        self.k_real = nn.Parameter(torch.ones(size))
-        self.v_imag = nn.Parameter(torch.zeros(size))
-        self.v_real = nn.Parameter(torch.ones(size))
+i0__ = [
+    lambda x: np.sin(x),
+    lambda x: np.cos(x),
+    lambda x: np.sin(x * np.pi),
+    lambda x: np.cos(x * np.pi),
+    lambda x: x * 2,
+    lambda x: x * 10,
+    lambda x: x * 0.1,
+    lambda x: x * 0.5,
+    lambda x: x * 0.9,
+    lambda x: x + 1,
+    lambda x: x - 1,
+    lambda x: x + 10,
+    lambda x: x - 10,
+    lambda x: -x,
+    lambda x: x / 2,
+    lambda x: np.tanh(x),
+    lambda x: x ** 2,
+    lambda x: np.abs(x),
+    lambda x: np.sqrt(np.abs(x)),
+    lambda x: (np.abs(x) ** (1/3)) * np.sign(x),
+    lambda x: np.log(np.square(x) + 1e-12),
+    lambda x: x,
+    lambda x: np.maximum(x, 0),
+    lambda x: np.minimum(x, 0),
+    lambda x: x + np.sin(x) ** 2,
+]
 
-    def forward(self, x: torch.Tensor):
-        q_weight = self.q_imag*1j + self.q_real
-        k_weight = self.k_imag*1j + self.k_real
-        v_weight = self.v_imag*1j + self.v_real
+i1__ = [
+    lambda x, y: x + y,
+    lambda x, y: x - y,
+    lambda x, y: x * y,
+    lambda x, y: x + y * 0.5,
+    lambda x, y: x + y * 0.1,
+    lambda x, y: x + y * 0.9,
+    lambda x, y: x / (y ** 2 + 1e-12),
+    lambda x, y: np.maximum(x, y),
+    lambda x, y: np.minimum(x, y),
+    lambda x, y: np.sqrt(x ** 2 + y ** 2),
+    lambda x, y: (x + y) / 2,
+    lambda x, y: (x - y) ** 2,
+    lambda x, y: x * np.tanh(y),
+    lambda x, y: x * (np.tanh(y) + 1),
+    lambda x, y: np.sin(x * np.pi * y),
+    lambda x, y: np.cos(x * np.pi * y),
+]
 
-        q = torch.fft.fft(x+0j)
-        q = q * q_weight.unsqueeze(0).unsqueeze(0)
-        q = torch.fft.ifft(q).real
+i2__ = [
+    lambda x, y, z: x + y + z,
+    lambda x, y, z: x + y - z,
+    lambda x, y, z: x - y - z,
+    lambda x, y, z: x * y * z,
+    lambda x, y, z: x * (y ** 2 + 1e-12) / (z ** 2 + 1e-12),
+    lambda x, y, z: x / (y ** 2 + z ** 2 + 1e-12),
+    lambda x, y, z: np.maximum(x, np.maximum(y, z)),
+    lambda x, y, z: np.minimum(x, np.minimum(y, z)),
+    lambda x, y, z: np.maximum(x, np.minimum(y, z)),
+    lambda x, y, z: np.sqrt(x ** 2 + y ** 2 + z ** 2),
+    lambda x, y, z: np.sqrt((x - y) ** 2 + (y - z) ** 2 + (z - x) ** 2),
+    lambda x, y, z: np.abs(x * y * z) ** (1/3) * np.sign(x * y * z),
+    lambda x, y, z: np.abs((x - y) * (y - z) * (z - x)) ** (1/3) * np.sign((x - y) * (y - z) * (z - x)),
+    lambda x, y, z: (x + y + z) / 3,
+    lambda x, y, z: np.sin(x * np.pi) * (1 + np.tanh(y)) + np.cos(z * np.pi) * (1 - np.tanh(x)),
+]
 
-        k = torch.fft.fft(x+0j)
-        k = k * k_weight.unsqueeze(0).unsqueeze(0)
-        k = torch.fft.ifft(k).real
+def activeNode(GENE1, GENE2, N_INPUTS, LAST_K):
+    I = np.arange(len(GENE1) - LAST_K, len(GENE1))
+    Nodes = set(I)
+    ANodes = list(I)
+    while len(ANodes) > 0:
+        BNodes = set()
+        for N in ANodes:
+            if(GENE1[int(N)][0] >= N_INPUTS):
+                BNodes.add(GENE1[int(N)][0])
+            if(GENE1[int(N)][1] >= N_INPUTS and GENE2[int(N)][0] >= len(i0__)):
+                BNodes.add(GENE1[int(N)][1])
+            if(GENE1[int(N)][2] >= N_INPUTS and GENE2[int(N)][0] >= len(i0__) + len(i1__)):
+                BNodes.add(GENE1[int(N)][2])
+        Nodes |= BNodes
+        ANodes = list(BNodes)
+    return list(np.floor(np.sort(list(Nodes))))
 
-        v = torch.fft.fft(x+0j)
-        v = v * v_weight.unsqueeze(0).unsqueeze(0)
-        v = torch.fft.ifft(v).real
+def execNode(GENE1, GENE2, ActiveNodes, Inputs, LAST_K):
+    Calculated = {}
+    for i, I in enumerate(Inputs):
+        Calculated[i] = I
+    for N in ActiveNodes:
+        if(N < len(Inputs)):
+            continue
+        if(GENE2[int(N)][0] < len(i0__)):
+            Calculated[N] = i0__[GENE2[int(N)][0]](Calculated[GENE1[int(N)][0]])
+        elif(GENE2[int(N)][0] < len(i0__) + len(i1__)):  
+            Calculated[N] = i1__[GENE2[int(N)][0] - len(i0__)](Calculated[GENE1[int(N)][0]], Calculated[GENE1[int(N)][1]])
+        else:
+            Calculated[N] = i2__[GENE2[int(N)][0] - len(i0__) - len(i1__)](Calculated[GENE1[int(N)][0]], Calculated[GENE1[int(N)][1]], Calculated[GENE1[int(N)][2]])
+    return [Calculated[N] for N in range(len(GENE1) - LAST_K, len(GENE1))]
 
-        scalar = np.sqrt(self.d_k)
-        attention_weight = torch.matmul(q, torch.transpose(k, 1, 2)) / scalar # 「Q * X^T / (D^0.5)」" を計算
-
-        attention_weight = nn.functional.softmax(attention_weight, dim=2) # Attention weightを計算
-        return torch.matmul(attention_weight, v) # (Attention weight) * X により重み付け.
-
-
-class FourierForwardNetwork(torch.nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.a_imag = nn.Parameter(torch.zeros(size))
-        self.a_real = nn.Parameter(torch.ones(size))
-        self.b_imag = nn.Parameter(torch.zeros(size))
-        self.b_real = nn.Parameter(torch.ones(size))
-        self.bias = nn.Parameter(torch.zeros(size))
-    def forward(self, x: torch.Tensor):
-        a = self.a_imag*1j + self.a_real
-        b = self.b_imag*1j + self.b_real
-
-        X = torch.fft.fft(x+0j)
-        X = X * a.unsqueeze(0).unsqueeze(0)
-        X = torch.fft.ifft(X).real
-
-        X = X + self.bias.unsqueeze(0).unsqueeze(0)
-        X = torch.nn.functional.gelu(X)
-        ## X = torch.nn.SiLU(X)
-        ## X = torch.sin(X)**2 + X
-
-        X = torch.fft.fft(x+0j)
-        X = X * b.unsqueeze(0).unsqueeze(0)
-        X = torch.fft.ifft(X).real
-        return X
-
-class FourierFourierAttention(torch.nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.q_imag = nn.Parameter(torch.zeros(size))
-        self.q_real = nn.Parameter(torch.ones(size))
-        self.k_imag = nn.Parameter(torch.zeros(size))
-        self.k_real = nn.Parameter(torch.ones(size))
-        self.v_imag = nn.Parameter(torch.zeros(size))
-        self.v_real = nn.Parameter(torch.ones(size))
-        self.rt_imag = nn.Parameter(torch.zeros(size))
-        self.rt_real = nn.Parameter(torch.ones(size))
-    def forward(self, x: torch.Tensor):
-        q_weight = self.q_imag*1j + self.q_real
-        k_weight = self.k_imag*1j + self.k_real
-        v_weight = self.v_imag*1j + self.v_real
-        rt_weight = self.rt_imag*1j + self.rt_real
-
-        q = torch.fft.fft(x+0j)
-        q = q * q_weight.unsqueeze(0).unsqueeze(0)
-        q = torch.fft.fft(q, dim=-2)
-
-        k = torch.fft.fft(x+0j)
-        k = k * k_weight.unsqueeze(0).unsqueeze(0)
-        k = torch.fft.fft(k, dim=-2)
-
-        v = torch.fft.fft(x+0j)
-        v = v * v_weight.unsqueeze(0).unsqueeze(0)
-        v = torch.fft.fft(v, dim=-2)
-
-        rt = q / (k + 1e-12) * v
-        rt = torch.fft.ifft(rt, dim=-2) * rt_weight.unsqueeze(0).unsqueeze(0)
-        rt = torch.fft.ifft(rt)
-        rt = rt.real
-        return rt
-
-class DyT(nn.Module):
-    def __init__(self, num_features, alpha_init_value=0.5):
-        super().__init__()
-        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
-        self.weight = nn.Parameter(torch.ones(num_features))
-        self.bias = nn.Parameter(torch.zeros(num_features))
+def execGridRNN(GENE1, GENE2, ActiveNodes, Image, hidden_dim, out_dim):
+    H, W = Image.shape[:2]
+    C = Image.shape[2] if len(Image.shape) > 2 else 1
     
-    def forward(self, x):
-        x = torch.tanh(self.alpha * x)
-        return x * self.weight + self.bias
+    # Hidden states: [height, width, hidden_dim]
+    # Initialized to zeros
+    Hidden = np.zeros((H + 1, W + 1, hidden_dim))
+    Output = np.zeros((H, W, out_dim))
+    
+    # LAST_K = out_dim + hidden_dim
+    LAST_K = out_dim + hidden_dim
+    N_INPUTS = C + 2 * hidden_dim # current pixel + hidden from top + hidden from left
+    
+    for y in range(H):
+        for x in range(W):
+            # Form input vector: [Pixel(s), Top_Hidden, Left_Hidden]
+            pixel_val = Image[y, x]
+            if np.isscalar(pixel_val):
+                pixel_val = [pixel_val]
+            else:
+                pixel_val = list(pixel_val)
+                
+            top_h = Hidden[y, x+1]
+            left_h = Hidden[y+1, x]
+            
+            inputs = np.concatenate([pixel_val, top_h, left_h])
+            
+            # Execute CGP
+            res = execNode(GENE1, GENE2, ActiveNodes, inputs, LAST_K)
+            
+            # res: [out_channel1, out_channel2, ..., new_h1, new_h2, ...]
+            Output[y, x] = np.array(res[:out_dim])
+            Hidden[y+1, x+1] = np.array(res[out_dim:])
+            
+    return Output, Hidden[1:, 1:]
 
-class FourierFFNBlock(nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.ffn = FourierForwardNetwork(size)
-        self.dyt = DyT(size)
+# ============================================================
+# DEMONSTRATION
+# ============================================================
+if __name__ == "__main__":
+    # Settings
+    HIDDEN_DIM = 4
+    OUT_DIM = 1 # RGB-like output
+    MODELLEN = 1000
+    IMG_SIZE = 96
+    
+    # Inputs: 1 (pixel) + 2 * HIDDEN_DIM (top + left)
+    N_INPUTS = 1 + 2 * HIDDEN_DIM
+    # Outputs: OUT_DIM (pixels) + HIDDEN_DIM (new hidden)
+    LAST_K = OUT_DIM + HIDDEN_DIM
+    
+    # Initialize Genes
+    GENE1 = np.random.randint(0, MODELLEN, (MODELLEN, 3)) % np.arange(MODELLEN)[:, None]
+    GENE2 = np.random.randint(0, len(i0__) + len(i1__) + len(i2__), (MODELLEN, 1))
+    
+    # Find Active Nodes for the specific input/output counts
+    aNodes = activeNode(GENE1, GENE2, N_INPUTS, LAST_K)
+    print(f"Active Nodes: {len(aNodes)}")
+    
+    # Create simple test image (gradient)
+    test_img = np.zeros((IMG_SIZE, IMG_SIZE))
+    for y in range(IMG_SIZE):
+        for x in range(IMG_SIZE):
+            test_img[y, x] = (y + x) / (2 * IMG_SIZE)
+            
+    # Execute Grid RNN CGP
+    print("Executing Grid RNN CGP with 3-channel output...")
+    start_time = time.time()
+    out_img, final_hidden = execGridRNN(GENE1, GENE2, aNodes, test_img, HIDDEN_DIM, OUT_DIM)
+    end_time = time.time()
+    print(f"Execution finished in {end_time - start_time:.4f} seconds.")
+    
+    # Normalize output image for visualization (simple clip and scale)
+    out_img_sum = np.sum(np.abs(out_img))
+    if out_img_sum > 0:
+        out_img = (out_img - np.min(out_img)) / (np.max(out_img) - np.min(out_img) + 1e-12)
 
-    def forward(self, x):
-        return self.ffn(self.dyt(x)) + x
-
-class FourierScaledDotProductAttentionBlock(nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.ffn = FourierScaledDotProductAttention(size)
-        self.dyt = DyT(size)
-
-    def forward(self, x):
-        return self.ffn(self.dyt(x)) + x
-
-class FourierFourierAttentionBlock(nn.Module):
-    def __init__(self, size=128):
-        super().__init__()
-        self.ffn = FourierFourierAttention(size)
-        self.dyt = DyT(size)
-
-    def forward(self, x):
-        return self.ffn(self.dyt(x)) + x
-
-class FourierTransformerLayer(nn.Module):
-    def __init__(self, size=128, attn_type="scaled"):
-        super().__init__()
-        self.attn_a = FourierFourierAttentionBlock(size)
-        self.attn_b = FourierScaledDotProductAttentionBlock(size)
-        self.ffn = FourierFFNBlock(size)
-
-    def forward(self, x):
-        x = self.attn_a(x)
-        x = self.attn_b(x)
-        x = self.ffn(x)
-        return x
-
-class FourierTransformerEncoder(nn.Module):
-    def __init__(self, size=128, depth=6,):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            FourierTransformerLayer(size)
-            for _ in range(depth)
-        ])
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-class FourierTransformer(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        size=128,
-        depth=6
-    ):
-        super().__init__()
-
-        self.embedding = nn.Embedding(vocab_size, size)
-        self.encoder = FourierTransformerEncoder(
-            size=size,
-            depth=depth,
-        )
-        self.output = nn.Linear(size, vocab_size)
-
-    def forward(self, x):
-        # x: (batch, seq)
-        x = self.embedding(x)
-        x = self.encoder(x)
-        return self.output(x)
-
-A = {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"+":10,"-":11,"*":12,"/":13,"=":14, "_":15, "'":16}
-def generatetekito():
-    S = int(np.random.randint(1, 2 ** np.random.randint(4, 32)))
-    S2 = int(np.random.randint(1, 2 ** np.random.randint(4, 32)))
-    S3 = int(np.random.randint(1, 2 ** np.random.randint(4, 32)))
-    enz = np.random.randint(0, 13)
-    if enz == 0:  return f"{S}+{S2}={S+S2}"
-    if enz == 1:  return f"{S}-{S2}={S-S2}"
-    if enz == 2:  return f"{S}*{S2}={S*S2}"
-    if enz == 3:  return f"{S}/{S2}={S//S2}"
-    if enz == 4:  return f"{S}+{S2}+{S3}={S+S2+S3}"
-    if enz == 5:  return f"{S}+{S2}-{S3}={S+S2-S3}"
-    if enz == 6:  return f"{S}+{S2}*{S3}={S+S2*S3}"
-    if enz == 7:  return f"{S}*{S2}+{S3}={S*S2+S3}"
-    if enz == 8:  return f"{S}*{S2}-{S3}={S*S2-S3}"
-    if enz == 9:  return f"{S}-{S2}*{S3}={S-S2*S3}"
-    if enz == 10: return f"{S}*{S2}/{S3}={int(S*S2/S3)}"
-    if enz == 11: return f"{S}-{S2}/{S3}={S - S2//S3}"
-    return f"{S}/{S2}*{S3}={int(S/S2*S3)}"
-
-def gendata(g, tt, lt):
-    at = [A[_] for _ in g]
-    at_ = [A[_] for _ in g]
-    s = ((len(at) - tt) / len(at))
-    g = np.random.choice(lt, lt, replace=False)
-    for i in range(tt):
-        at[g[i]] = 16
-    return at, at_
-
-device = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
-
-VOCAB_SIZE = 17
-SEQ_LEN = 64
-BATCH = 128
-EPOCHS = 50
-LR = 3e-4
-MAX_NOISE = 64
-
-def make_batch(batch_size=BATCH, max_noise=MAX_NOISE):
-    xs = []
-    ys = []
-
-    for _ in range(batch_size):
-        g = generatetekito()
-        g2 = g[:SEQ_LEN].ljust(SEQ_LEN, "_")  # padding
-        noise = np.random.randint(1, len(g))
-
-        x_noised, x_clean = gendata(g2, noise, len(g))
-        x_noised[len(g):] = np.ones(SEQ_LEN-len(g)) * 15
-        x_clean[len(g):] = np.ones(SEQ_LEN-len(g)) * 15
-
-        xs.append(x_noised)
-        ys.append(x_clean)
-
-    return (
-        torch.tensor(xs, dtype=torch.long, device=device),
-        torch.tensor(ys, dtype=torch.long, device=device),
-    )
-
-model = FourierTransformer(
-    vocab_size=VOCAB_SIZE,
-    size=256,
-    depth=8
-).to(device)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-criterion = nn.CrossEntropyLoss()
-
-idhk = 0.0
-model.train()
-for step in range(300):
-    x, y = make_batch()
-
-    logits = model(x)  # (B, T, V)
-    loss = criterion(
-        logits.view(-1, VOCAB_SIZE),
-        y.view(-1)
-    )
-
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    if(step == 0):
-        idhk = float(loss)
-
-    print(f"{step}, {loss:.4f}")
-
-def decode(tokens):
-    inv = {v:k for k,v in A.items()}
-    return "".join(inv[int(t)] for t in tokens)
-
-for j in range(128):
-    model.eval()
-    x, y = make_batch(1, max_noise=8)
-    with torch.no_grad():
-        out = model(x).argmax(dim=-1)
-
-    print("input :", decode(x[0]))
-    print("target:", decode(y[0]))
-    print("pred  :", decode(out[0]))
+    # Plot results
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 3, 1)
+    plt.title("Input Image (Gradient)")
+    plt.imshow(test_img, cmap='gray')
+    
+    plt.subplot(1, 3, 2)
+    plt.title(f"Output Image ({OUT_DIM} channels)")
+    # If OUT_DIM is 3, imshow handles it as RGB. If not 3, imshow might fail or show weirdly.
+    # For visualization, we'll try to show it as RGB if it's 3, otherwise just 1st channel.
+    if OUT_DIM == 3:
+        plt.imshow(out_img)
+    else:
+        plt.imshow(out_img[:, :, 0], cmap='gray')
+        
+    plt.subplot(1, 3, 3)
+    plt.title("Hidden State (1st channel)")
+    plt.imshow(final_hidden[:, :, 0], cmap='viridis')
+    
+    plt.tight_layout()
+    plt.show()
