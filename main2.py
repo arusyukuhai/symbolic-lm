@@ -698,7 +698,7 @@ def score_logits_from_logits10(logits10: np.ndarray, label: int):
     order = logits10
     top1 = (order[:, 0] == label).astype(np.float32)
 
-    weights = 1 / ((np.arange(10) + 1) ** 2)
+    weights = 1 / ((np.arange(10) + 1) ** 3)
     kk = min(9, order.shape[1])
     hit = np.zeros((logits10.shape[0],), dtype=np.float32)
     for k in range(kk):
@@ -708,8 +708,8 @@ def score_logits_from_logits10(logits10: np.ndarray, label: int):
 # ============================================================
 # POPULATION
 # ============================================================
-MODELLEN = 10000
-POP = 12**2
+MODELLEN = 20000
+POP = 20**2
 LAST_K = 10   # feature dim
 NUM_FUNCS = len_i0 + len_i1 + len_i2
 
@@ -784,13 +784,13 @@ test_datas = [testset[j] for j in range(512)]
 # ============================================================
 # BOOKKEEPING (restore style)
 # ============================================================
-bestacc = np.full(20, 0.0, dtype=np.float64)
+bestacc = np.full(100, 0.0, dtype=np.float64)
 elites_g1 = []
 elites_g2 = []
 elites_w  = []
 elites_b  = []
 
-def train_slice_indices(step, total, slices=20):
+def train_slice_indices(step, total, slices=100):
     a = (step % slices) * total // slices
     b = (step % slices + 1) * total // slices
     return a, b
@@ -798,26 +798,31 @@ def train_slice_indices(step, total, slices=20):
 class Expert(nn.Module):
     def __init__(self, input_m=1):
         super().__init__()
-        self.linearA = nn.Linear(256 * input_m, 1024)
-        self.linearB = nn.Linear(256, 1024)
-        self.linearC = nn.Linear(1024, 256)
-        self.linearD = nn.Linear(1024, 256)
-        self.RMSNorm = nn.RMSNorm(256)
+        self.linearA = nn.Linear(192 * input_m, 768)
+        self.linearB = nn.Linear(768, 192)
+        self.linearC = nn.Linear(768, 192)
+        self.linearD = nn.Linear(192 * input_m, 768)
+        self.rmsnorm = nn.RMSNorm(192 * input_m)
         
     def forward(self, x):
-        X = self.RMSNorm(x)
-        X = F.silu(self.linearA(X)) * self.linearB(X) #SwiGLU
-        gate = F.sigmoid(self.linearD(X))
-        return self.linearC(X) * gate + x * (1 - gate)
+        X = self.rmsnorm(x)
+        X = F.silu(self.linearA(X)) * self.linearD(X)
+        gate = F.sigmoid(self.linearB(X))
+        return self.linearC(X) * gate + x[..., :192] * (1 - gate)
 
 class SurrogateModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.embedding = nn.Embedding(3, 256)
-        self.i0t_experts = nn.ModuleList([Expert() for _ in range(i0t)])
-        self.i1t_experts = nn.ModuleList([Expert(2) for _ in range(i0t)])
-        self.i2t_experts = nn.ModuleList([Expert(3) for _ in range(i0t)])
-        self.output = nn.Linear(256*10, 1)
+        self.embedding_1 = nn.Parameter(torch.randn(192))
+        self.embedding_2 = nn.Parameter(torch.randn(192))
+        self.embedding_3 = nn.Parameter(torch.randn(192))
+        self.i0t_experts = nn.ModuleList([Expert() for _ in range(len(i0t))])
+        self.i1t_experts = nn.ModuleList([Expert(2) for _ in range(len(i1t))])
+        self.i2t_experts = nn.ModuleList([Expert(3) for _ in range(len(i2t))])
+        self.output = nn.Linear(192*10, 768)
+        self.output2 = nn.Linear(192*10, 768)
+        self.output3 = nn.Linear(768, 1)
+        self.rmsnorm = nn.RMSNorm(192*10)
 
     def forward(self, node_structs,
                             struct_type,
@@ -826,15 +831,16 @@ class SurrogateModel(nn.Module):
                             struct_ch2,
                             struct_ch3,
                             struct_alpha,
-                            needed_sids):
+                            needed_sids,
+                            last_k = 10):
         # Surrogate Run With Correct DAG
         N, MODELLEN = node_structs.shape
         S = struct_type.shape[0]
 
         outputs = [None] * S
-        outputs[0] = self.embedding(0)
-        outputs[1] = self.embedding(1)
-        outputs[2] = self.embedding(2)
+        outputs[0] = self.embedding_1
+        outputs[1] = self.embedding_2
+        outputs[2] = self.embedding_3
 
         for sid in needed_sids:
             sid = int(sid)
@@ -854,36 +860,41 @@ class SurrogateModel(nn.Module):
                 fid = int(struct_func[sid])
                 c1 = int(struct_ch1[sid]); c2 = int(struct_ch2[sid])
                 a = outputs[c1]; b = outputs[c2]
-                base = self.i1t_experts[fid](a, b)
+                base = self.i1t_experts[fid](torch.concatenate([a, b], dim=-1))
                 outputs[sid] = (1.0 - alpha) * base + alpha * a
 
             elif t == 3:
                 fid = int(struct_func[sid])
                 c1 = int(struct_ch1[sid]); c2 = int(struct_ch2[sid]); c3 = int(struct_ch3[sid])
                 a = outputs[c1]; b = outputs[c2]; c = outputs[c3]
-                base = self.i2t_experts[fid](a, b, c)
+                base = self.i2t_experts[fid](torch.concatenate([a, b, c], dim=-1))
                 outputs[sid] = (1.0 - alpha) * base + alpha * a
 
         last_nodes = np.arange(max(0, MODELLEN-last_k), MODELLEN, dtype=np.int32)
         last_sids = node_structs[:, last_nodes]  # (POP,last_k)
 
         uniq = np.unique(last_sids[last_sids >= 0])
-        sid_mean = np.zeros(S, dtype=np.float32)
-        sid_has = np.zeros(S, dtype=np.bool_)
+        sid_mean = {}
+        sid_has = {}
         for usid in uniq:
             usid = int(usid)
             arr = outputs[usid]
             if arr is None:
                 continue
-            sid_mean[usid] = np.float32(arr.mean())
+            sid_mean[usid] = arr
             sid_has[usid] = True
 
-        feat = np.zeros((N, last_k), dtype=np.float32)
+        feat = []
+        for i in range(N):
+            G = self.rmsnorm(torch.flatten(torch.concatenate([sid_mean[int(sid)] for sid in last_sids[i] if sid >= 0 and sid_has[int(sid)]])))
+            feat.append(torch.mean(F.sigmoid(self.output3(self.output2(G) * F.silu(self.output(G)))), dim=-1))
+        feat = torch.stack(feat)
+        """feat = np.zeros((N, last_k), dtype=np.float32)
         for i in range(N):
             for j in range(last_k):
                 sid = int(last_sids[i, j])
                 if sid >= 0 and sid_has[sid]:
-                    feat[i, j] = sid_mean[sid]
+                    feat[i, j] = sid_mean[sid]"""
         return feat
         
 
@@ -1010,19 +1021,22 @@ class Muon(torch.optim.Optimizer):
  
         return loss
 
-hidden_weights = [p for p in surrogate_model.parameters() if p.ndim >= 2]
-hidden_gains_biases = [p for p in surrogate_model.parameters() if p.ndim < 2]
+
+import copy
+
+surrogatemodel = SurrogateModel()
+surrogatemodel.to("mps")
+hidden_weights = [p for p in surrogatemodel.parameters() if p.ndim >= 2 and p.shape[0] != 1 and p.shape[1] != 1]
+hidden_gains_biases = [p for p in surrogatemodel.parameters() if p.ndim < 2 or p.shape[0] == 1 or p.shape[1] == 1]
 param_groups = [
     dict(params=hidden_weights, use_muon=True,
          lr=0.02, weight_decay=0.01),
     dict(params=hidden_gains_biases, use_muon=False,
-         lr=3e-4, betas=(0.9, 0.95), weight_decay=0.01),
+         lr=3e-4, betas=(0.9, 0.98), weight_decay=0.01),
 ]
 optimizer = Muon(param_groups)
-
-import copy
-
 prevsurrogate_loss = 0
+surrogate_history = []  # List of (step, model_state, optimizer_state)
 # ============================================================
 # MAIN LOOP
 # ============================================================
@@ -1045,8 +1059,43 @@ for step in range(1_000_000):
 
     needed_sids = build_needed_sids_once(node_structs, struct_type, struct_ch1, struct_ch2, struct_ch3, last_k=LAST_K)
 
+    esmilated_losses = surrogatemodel(node_structs, struct_type, struct_func, struct_ch1, struct_ch2, struct_ch3, struct_alpha,
+            needed_sids)
+    
+    # --- NaN/Low-Std Check and Rollback ---
+    es_numpy = esmilated_losses.detach().cpu().numpy()
+    if np.isnan(es_numpy).any() or np.isinf(es_numpy).any() or np.std(es_numpy) < 1e-4:
+        #print(f"\n[ALERT] Surrogate model instability detected at step {step}!")
+        #print(f"NaN/Inf found: {np.isnan(es_numpy).any() or np.isinf(es_numpy).any()}")
+        #print(f"Std dev: {np.std(es_numpy)}")
+        
+        if len(surrogate_history) > 0:
+            # Try to roll back to the oldest available state (which should be ~20-30 steps ago)
+            target_step, target_model_state, target_opt_state = surrogate_history[0]
+            #print(f"Rolling back to step {target_step}...")
+            surrogatemodel.load_state_dict(target_model_state)
+            optimizer.load_state_dict(target_opt_state)
+            
+            # Re-run forward pass with restored model
+            esmilated_losses = surrogatemodel(node_structs, struct_type, struct_func, struct_ch1, struct_ch2, struct_ch3, struct_alpha,
+                    needed_sids)
+        else:
+            pass
+            #print("No history available to roll back. Proceeding with caution.")
+    
+    # Save history periodically (every 10 steps)
+    if step % 5 == 0:
+        surrogate_history.append((
+            step, 
+            {k: v.cpu().clone() for k, v in surrogatemodel.state_dict().items()},
+            copy.deepcopy(optimizer.state_dict())
+        ))
+        # Keep last 3 history snapshots (approx 30 steps of history)
+        if len(surrogate_history) > 3:
+            surrogate_history.pop(0)
+    #print(esmilated_losses.detach().cpu().numpy().shape)
     # ---- TRAIN EVAL ----
-    a, b = train_slice_indices(step, len(trainset), slices=20)
+    a, b = train_slice_indices(step, len(trainset), slices=100)
     SCALE = 96
 
     rank = []
@@ -1077,7 +1126,18 @@ for step in range(1_000_000):
     losses = -(losses / denom) * 100.0  # more negative = better (higher hit)
     losses__ = np.copy(losses)
 
+    surrogate_loss = torch.mean(torch.square(torch.tensor(-losses / 100, dtype=torch.float32).to("mps") - esmilated_losses))
+    if(step == 0):
+        idhk_surrogate = np.log(surrogate_loss.detach().cpu().numpy())
+    idhk_surrogate = np.nan_to_num(np.log(surrogate_loss.detach().cpu().numpy())) * 0.1 + idhk_surrogate * 0.9
+
+    surrogate_loss.backward()
+    optimizer.step()
     optimizer.zero_grad()
+
+    losses -= esmilated_losses.detach().cpu().numpy() * step / 2000 * 100
+    
+    """optimizer.zero_grad()
     eslosses = np.zeros(POP, dtype=np.float64)
     surrogate_loss = 0
     nan_occurred = False
@@ -1133,41 +1193,31 @@ for step in range(1_000_000):
         for idx_in_batch, i in enumerate(indices):
             val = esmilated_batch[idx_in_batch].item()
             eslosses[i] += val
-            losses[i] -= np.nan_to_num(val) * step / 1000 * 100
+            losses[i] -= np.nan_to_num(val) * step / 2000 * 100
         
         surrogate_loss += batch_loss.item()
-        gc.collect()
-
-    if np.std(eslosses) < 1e-5 :
-        nan_occurred = True
-
-    if nan_occurred:
-        # Revert
-        surrogate_model.load_state_dict(prev_state)
-        optimizer.load_state_dict(prev_opt_state)
-        surrogate_loss = prevsurrogate_loss # reset loss or use previous if available
-    else:
-        optimizer.step()
-
-    prevsurrogate_loss = surrogate_loss
+        gc.collect()"""
     rank = np.argsort(losses)  # best first
 
     # elite tracking (restore your rule shape)
-    slot = step % 20
+    slot = step % 100
     a_prev = bestacc[slot]
     if bestacc[slot] / (np.min(losses__)) < 0.999999:
         bestacc[slot] = np.min(losses__)
-        elites_g1.append(pop_g1[rank[0]].copy())
-        elites_g2.append(pop_g2[rank[0]].copy())
-        elites_w.append(pop_w[rank[0]].copy())
-        elites_b.append(pop_b[rank[0]].copy())
+        if step < 100:
+            elites_g1.append(pop_g1[rank[0]].copy())
+            elites_g2.append(pop_g2[rank[0]].copy())
+            elites_w.append(pop_w[rank[0]].copy())
+            elites_b.append(pop_b[rank[0]].copy())
+        else:
+            elites_g1[slot] = pop_g1[rank[0]].copy()
+            elites_g2[slot] = pop_g2[rank[0]].copy()
+            elites_w[slot]  = pop_w[rank[0]].copy()
+            elites_b[slot]  = pop_b[rank[0]].copy()
 
-    if(step == 0):
-        idhk_surrogate = np.log(surrogate_loss)
-    idhk_surrogate = np.log(surrogate_loss) * 0.1 + idhk_surrogate * 0.9
-    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(eslosses) * 100), ",", idhk_surrogate, ",", step / 1000, ",", np.std(eslosses), ",", scipy.stats.kurtosis(eslosses))
+    esmilated_losses = esmilated_losses.detach().cpu().numpy()
+    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", step / 2000, ",", np.std(esmilated_losses), ",", scipy.stats.kurtosis(esmilated_losses))
 
-    del prev_state, prev_opt_state
     # ============================================================
     # SELECTION + REPRODUCTION (aligned for g1/g2/w/b)
     # ============================================================
@@ -1176,7 +1226,7 @@ for step in range(1_000_000):
     new_w  = []
     new_b  = []
 
-    KEEP = 12
+    KEEP = 20
     for tt in range(KEEP):
         pidx = int(rank[tt])
         new_g1.append(pop_g1[pidx].copy())
@@ -1186,10 +1236,10 @@ for step in range(1_000_000):
 
     mutation_rate = np.random.uniform(0, 1) ** 2
 
-    for g__ in range(11):
-        for h__ in range(12):
-            g = g__%5
-            h = h__%5
+    for g__ in range(19):
+        for h__ in range(20):
+            g = g__ % 10
+            h = h__ % 10
             pa = int(rank[g])
             pb = int(rank[h])
 
@@ -1227,14 +1277,14 @@ for step in range(1_000_000):
                     child2[pos] = np.random.choice(NUM_FUNCS, p=T2)
 
             if(np.random.uniform(0, 1) < 0.05 * mutation_rate):
-                for __ in range(np.random.randint(1, 2**np.random.randint(1, 10))):
+                for __ in range(np.random.randint(1, 2**np.random.randint(1, np.floor(np.log2(MODELLEN))))):
                     pos = np.random.randint(4, MODELLEN-1)
                     child1[pos][np.random.randint(0, 3)] = np.random.randint(0, pos-1)
 
             if(np.random.uniform(0, 1) < 0.05 * mutation_rate):
                 tt = 1 - (np.random.uniform(0, 1) ** 2)
                 T2 = (T ** tt) / np.sum(T ** tt)
-                for __ in range(np.random.randint(1, 2**np.random.randint(1, 10))):
+                for __ in range(np.random.randint(1, 2**np.random.randint(1, np.floor(np.log2(MODELLEN))))):
                     pos = np.random.randint(4, MODELLEN-1)
                     child2[pos] = np.random.choice(NUM_FUNCS, p=T2)
 
@@ -1249,21 +1299,21 @@ for step in range(1_000_000):
                 child2 = np.random.choice(NUM_FUNCS, (MODELLEN,), p=T2).astype(np.int32)
 
             if(np.random.uniform(0, 1) < 0.003150 * mutation_rate):
-                TT3 = 2**np.random.randint(1, 10)
+                TT3 = 2**np.random.randint(1, np.floor(np.log2(MODELLEN))-1)
                 p1 = np.random.randint(0, MODELLEN-2)
                 p2 = np.random.randint(p1, MODELLEN)
                 lv = np.random.randint(-TT3, TT3)
                 child1[p1:p2] = child1[p1:p2] + lv
 
             if(np.random.uniform(0, 1) < 0.003150 * mutation_rate):
-                TT3 = 2**np.random.randint(1, 10)
+                TT3 = 2**np.random.randint(1, np.floor(np.log2(MODELLEN))-1)
                 p1 = np.random.randint(TT3+1, MODELLEN-TT3-1)
                 p2 = np.random.randint(p1, MODELLEN-TT3-1)
                 p3 = np.random.randint(-TT3, TT3)
                 child1[p1-p3:p2-p3] = child1[p1:p2]
 
             if(np.random.uniform(0, 1) < 0.003150 * mutation_rate):
-                TT3 = 2**np.random.randint(1, 10)
+                TT3 = 2**np.random.randint(1, np.floor(np.log2(MODELLEN))-1)
                 p1 = np.random.randint(TT3+1, MODELLEN-TT3-1)
                 p2 = np.random.randint(p1, MODELLEN-TT3-1)
                 p3 = np.random.randint(-TT3, TT3)
@@ -1290,7 +1340,7 @@ for step in range(1_000_000):
                 child1 = tmp.astype(np.int32, copy=False)
 
             if(np.random.uniform(0, 1) < 0.00650 * mutation_rate):
-                TT3 = 2**np.random.randint(1, 10)
+                TT3 = 2**np.random.randint(1, np.floor(np.log2(MODELLEN))-1)
                 p1 = np.random.randint(TT3+1, MODELLEN-TT3-1)
                 p2 = np.random.randint(p1, MODELLEN-TT3-1)
                 p3 = np.random.randint(-TT3, TT3)
@@ -1298,7 +1348,7 @@ for step in range(1_000_000):
                 child2[p1-p3:p2-p3] = child2[p1:p2]
 
             if(np.random.uniform(0, 1) < 0.00650 * mutation_rate):
-                TT3 = 2**np.random.randint(1, 10)
+                TT3 = 2**np.random.randint(1, np.floor(np.log2(MODELLEN))-1)
                 p1 = np.random.randint(TT3+1, MODELLEN-TT3-1)
                 p2 = np.random.randint(p1, MODELLEN-TT3-1)
                 p3 = np.random.randint(-TT3, TT3)
@@ -1335,18 +1385,18 @@ for step in range(1_000_000):
 
     # elite injection (also inject W,b)
     if len(elites_g1) > 0:
-        inject = min(12, len(elites_g1))
-        half = inject // 2
+        inject = min(100, len(elites_g1))
+        #half = inject // 2
 
-        for k in range(half):
+        for k in range(inject):
             r = np.random.randint(0, POP)
-            src = len(elites_g1) - 1 - k
+            src = k
             pop_g1[r] = elites_g1[src].copy()
             pop_g2[r] = elites_g2[src].copy()
             pop_w[r]  = elites_w[src].copy()
             pop_b[r]  = elites_b[src].copy()
 
-        if len(elites_g1) >= inject:
+        """if len(elites_g1) >= inject:
             lo = max(0, (len(elites_g1)-inject)//2)
             hi = len(elites_g1) - half
             if hi > lo:
@@ -1356,7 +1406,7 @@ for step in range(1_000_000):
                     pop_g1[r] = elites_g1[src].copy()
                     pop_g2[r] = elites_g2[src].copy()
                     pop_w[r]  = elites_w[src].copy()
-                    pop_b[r]  = elites_b[src].copy()
+                    pop_b[r]  = elites_b[src].copy()"""
 
     if step % 50 == 1:
         try:
@@ -1365,7 +1415,7 @@ for step in range(1_000_000):
                 pop_g1=pop_g1, pop_g2=pop_g2, pop_w=pop_w, pop_b=pop_b,
                 bestacc=bestacc
             )
-            surrogate_model.save("surrogate_model.pt")
+            surrogatemodel.save("surrogate_model.pt")
         except Exception:
             pass
     gc.collect()
