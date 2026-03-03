@@ -212,7 +212,8 @@ i0__ = {
     "CH": lambda a: np.sort(a, axis=-2),
     "CI": lambda a: np.argsort(a, axis=-1) / a.shape[0],
     "CJ": lambda a: np.argsort(a, axis=-2) / a.shape[0],
-    "CK": lambda a: np.maximum(a, np.mean(a))
+    "CK": lambda a: np.maximum(a, np.mean(a)),
+    "CL": lambda a: scipy.special.erf(a),
 }
 
 i1_ = {
@@ -711,8 +712,8 @@ def score_logits_from_logits10(logits10: np.ndarray, label: int):
 # ============================================================
 # POPULATION
 # ============================================================
-MODELLEN = 20000
-POP = 16**2
+MODELLEN = 40000
+POP = 20**2
 LAST_K = 10   # feature dim
 NUM_FUNCS = len_i0 + len_i1 + len_i2
 
@@ -1040,7 +1041,7 @@ param_groups = [
 optimizer = Muon(param_groups)
 prevsurrogate_loss = 0
 surrogate_history = []  # List of (step, model_state, optimizer_state)
-string = "step,min_loss,min_loss_surrogate,avg_loss,prev_loss,max_acc,num_elites,max_esmilated_loss,idhk_surrogate,progress"
+string = "step,min_loss,min_loss_surrogate,avg_loss,prev_loss,max_acc,num_elites,max_esmilated_loss,idhk_surrogate,percent<br/>"
 
 app = Flask(__name__)
 
@@ -1152,7 +1153,8 @@ for step in range(1_000_000):
     optimizer.step()
     optimizer.zero_grad()
 
-    losses -= esmilated_losses.detach().cpu().numpy() * step / 5000 * 100
+    percent = scipy.special.erf(step / 300 - 2) * 0.5 + 0.5
+    losses = (1 - percent) * losses - percent * esmilated_losses.detach().cpu().numpy() * 100
     
     """optimizer.zero_grad()
     eslosses = np.zeros(POP, dtype=np.float64)
@@ -1233,8 +1235,8 @@ for step in range(1_000_000):
             elites_b[slot]  = pop_b[rank[0]].copy()
 
     esmilated_losses = esmilated_losses.detach().cpu().numpy()
-    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", step / 5000)
-    string += str(step) + "," + str(-float(np.min(losses__))) + "," + str(-float(np.min(losses))) + "," + str(-float(np.sum(bestacc) / min(step+1, len(bestacc)))) + "," + str(-float(a_prev)) + "," + str(float(np.max(acc1))) + "," + str(len(elites_g1)) + "," + str(float(np.max(esmilated_losses) * 100)) + "," + str(idhk_surrogate) + "," + str(step / 5000) + "\n<br/>"
+    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", percent)
+    string += str(step) + "," + str(-float(np.min(losses__))) + "," + str(-float(np.min(losses))) + "," + str(-float(np.sum(bestacc) / min(step+1, len(bestacc)))) + "," + str(-float(a_prev)) + "," + str(float(np.max(acc1))) + "," + str(len(elites_g1)) + "," + str(float(np.max(esmilated_losses) * 100)) + "," + str(idhk_surrogate) + "," + str(percent) + "\n<br/>"
 
     # ============================================================
     # SELECTION + REPRODUCTION (aligned for g1/g2/w/b)
@@ -1244,7 +1246,7 @@ for step in range(1_000_000):
     new_w  = []
     new_b  = []
 
-    KEEP = 16
+    KEEP = 20
     for tt in range(KEEP):
         pidx = int(rank[tt])
         new_g1.append(pop_g1[pidx].copy())
@@ -1254,8 +1256,8 @@ for step in range(1_000_000):
 
     mutation_rate = np.random.uniform(0, 1) ** 3
 
-    for g__ in range(15):
-        for h__ in range(16):
+    for g__ in range(19):
+        for h__ in range(20):
             g = g__
             h = h__
             pa = int(rank[g])
