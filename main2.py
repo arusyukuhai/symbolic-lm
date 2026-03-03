@@ -27,6 +27,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 import scipy
+from flask import Flask
+import multiprocessing
+
 torch.set_num_threads(1)
 
 os.environ['MASTER_ADDR'] = 'localhost'
@@ -709,7 +712,7 @@ def score_logits_from_logits10(logits10: np.ndarray, label: int):
 # POPULATION
 # ============================================================
 MODELLEN = 20000
-POP = 20**2
+POP = 16**2
 LAST_K = 10   # feature dim
 NUM_FUNCS = len_i0 + len_i1 + len_i2
 
@@ -1037,6 +1040,17 @@ param_groups = [
 optimizer = Muon(param_groups)
 prevsurrogate_loss = 0
 surrogate_history = []  # List of (step, model_state, optimizer_state)
+string = "step,min_loss,min_loss_surrogate,avg_loss,prev_loss,max_acc,num_elites,max_esmilated_loss,idhk_surrogate,progress"
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "<html><head><meta http-equiv=\"refresh\" content=\"5\"><meta charset=\"UTF-8\"></head><body><pre>" + string + "</pre></body></html>"
+
+multiprocessing.set_start_method("spawn", force=True)
+multiprocessing.Process(target=app.run, args=("localhost", 5000)).start()
+
 # ============================================================
 # MAIN LOOP
 # ============================================================
@@ -1126,16 +1140,18 @@ for step in range(1_000_000):
     losses = -(losses / denom) * 100.0  # more negative = better (higher hit)
     losses__ = np.copy(losses)
 
-    surrogate_loss = torch.mean(torch.square(torch.tensor(-losses / 100, dtype=torch.float32).to("mps") - esmilated_losses))
+    g = torch.tensor(-losses / 100, dtype=torch.float32).to("mps")
+    surrogate_loss = torch.mean(- (((1 - g) * torch.log(1 - esmilated_losses)) + (g * torch.log(esmilated_losses))))
+    surrogate_loss -= torch.mean(- (((1 - g) * torch.log(1 - g)) + (g * torch.log(g))))
     if(step == 0):
-        idhk_surrogate = np.log(surrogate_loss.detach().cpu().numpy())
-    idhk_surrogate = np.nan_to_num(np.log(surrogate_loss.detach().cpu().numpy())) * 0.1 + idhk_surrogate * 0.9
+        idhk_surrogate = np.log2(surrogate_loss.detach().cpu().numpy())
+    idhk_surrogate = np.nan_to_num(np.log2(surrogate_loss.detach().cpu().numpy())) * 0.1 + idhk_surrogate * 0.9
 
     surrogate_loss.backward()
     optimizer.step()
     optimizer.zero_grad()
 
-    losses -= esmilated_losses.detach().cpu().numpy() * step / 2000 * 100
+    losses -= esmilated_losses.detach().cpu().numpy() * step / 5000 * 100
     
     """optimizer.zero_grad()
     eslosses = np.zeros(POP, dtype=np.float64)
@@ -1193,7 +1209,7 @@ for step in range(1_000_000):
         for idx_in_batch, i in enumerate(indices):
             val = esmilated_batch[idx_in_batch].item()
             eslosses[i] += val
-            losses[i] -= np.nan_to_num(val) * step / 2000 * 100
+            losses[i] -= np.nan_to_num(val) * step / 5000 * 100
         
         surrogate_loss += batch_loss.item()
         gc.collect()"""
@@ -1216,7 +1232,8 @@ for step in range(1_000_000):
             elites_b[slot]  = pop_b[rank[0]].copy()
 
     esmilated_losses = esmilated_losses.detach().cpu().numpy()
-    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", step / 2000, ",", np.std(esmilated_losses), ",", scipy.stats.kurtosis(esmilated_losses))
+    print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", step / 5000)
+    string += str(step) + "," + str(-float(np.min(losses__))) + "," + str(-float(np.min(losses))) + "," + str(-float(np.sum(bestacc) / min(step+1, len(bestacc)))) + "," + str(-float(a_prev)) + "," + str(float(np.max(acc1))) + "," + str(len(elites_g1)) + "," + str(float(np.max(esmilated_losses) * 100)) + "," + str(idhk_surrogate) + "," + str(step / 5000) + "\n"
 
     # ============================================================
     # SELECTION + REPRODUCTION (aligned for g1/g2/w/b)
@@ -1226,7 +1243,7 @@ for step in range(1_000_000):
     new_w  = []
     new_b  = []
 
-    KEEP = 20
+    KEEP = 16
     for tt in range(KEEP):
         pidx = int(rank[tt])
         new_g1.append(pop_g1[pidx].copy())
@@ -1234,12 +1251,12 @@ for step in range(1_000_000):
         new_w.append(pop_w[pidx].copy())
         new_b.append(pop_b[pidx].copy())
 
-    mutation_rate = np.random.uniform(0, 1) ** 2
+    mutation_rate = np.random.uniform(0, 1) ** 3
 
-    for g__ in range(19):
-        for h__ in range(20):
-            g = g__ % 10
-            h = h__ % 10
+    for g__ in range(15):
+        for h__ in range(16):
+            g = g__
+            h = h__
             pa = int(rank[g])
             pb = int(rank[h])
 
@@ -1278,14 +1295,14 @@ for step in range(1_000_000):
 
             if(np.random.uniform(0, 1) < 0.05 * mutation_rate):
                 for __ in range(np.random.randint(1, 2**np.random.randint(1, np.floor(np.log2(MODELLEN))))):
-                    pos = np.random.randint(4, MODELLEN-1)
+                    pos = np.random.randint(1, MODELLEN//3-1) + np.random.randint(1, MODELLEN//3-1) + np.random.randint(1, MODELLEN//3-1)
                     child1[pos][np.random.randint(0, 3)] = np.random.randint(0, pos-1)
 
             if(np.random.uniform(0, 1) < 0.05 * mutation_rate):
                 tt = 1 - (np.random.uniform(0, 1) ** 2)
                 T2 = (T ** tt) / np.sum(T ** tt)
                 for __ in range(np.random.randint(1, 2**np.random.randint(1, np.floor(np.log2(MODELLEN))))):
-                    pos = np.random.randint(4, MODELLEN-1)
+                    pos = np.random.randint(1, MODELLEN//3-1) + np.random.randint(1, MODELLEN//3-1) + np.random.randint(1, MODELLEN//3-1)
                     child2[pos] = np.random.choice(NUM_FUNCS, p=T2)
 
             if(np.random.uniform(0, 1) < 0.0015 * mutation_rate):
@@ -1408,7 +1425,7 @@ for step in range(1_000_000):
                     pop_w[r]  = elites_w[src].copy()
                     pop_b[r]  = elites_b[src].copy()"""
 
-    if step % 50 == 1:
+    if step % 200 == 1:
         try:
             np.savez(
                 "dats_fast_readout_score.npz",
