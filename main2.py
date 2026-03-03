@@ -28,7 +28,7 @@ import torch.nn.functional as F
 import os
 import scipy
 from flask import Flask
-import multiprocessing
+import threading
 
 torch.set_num_threads(1)
 
@@ -1046,10 +1046,11 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
+    global string
     return "<html><head><meta http-equiv=\"refresh\" content=\"5\"><meta charset=\"UTF-8\"></head><body><pre>" + string + "</pre></body></html>"
 
-multiprocessing.set_start_method("spawn", force=True)
-multiprocessing.Process(target=app.run, args=("localhost", 5000)).start()
+t = threading.Thread(target=app.run, args=("localhost", 8000))
+t.start()
 
 # ============================================================
 # MAIN LOOP
