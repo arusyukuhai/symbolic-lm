@@ -1047,7 +1047,7 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     global string
-    return "<html><head><meta http-equiv=\"refresh\" content=\"5\"><meta charset=\"UTF-8\"></head><body><pre>" + string + "</pre></body></html>"
+    return "<html><head><meta http-equiv=\"refresh\" content=\"5\"><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"></head><body><pre>" + string + "</pre></body></html>"
 
 t = threading.Thread(target=app.run, args=("localhost", 8000))
 t.start()
@@ -1234,7 +1234,7 @@ for step in range(1_000_000):
 
     esmilated_losses = esmilated_losses.detach().cpu().numpy()
     print(step, ",", -float(np.min(losses__)), ",", -float(np.min(losses)), ",", -float(np.sum(bestacc) / min(step+1, len(bestacc))), ",", -float(a_prev), ",", float(np.max(acc1)), ",", len(elites_g1), ",", float(np.max(esmilated_losses) * 100), ",", idhk_surrogate, ",", step / 5000)
-    string += str(step) + "," + str(-float(np.min(losses__))) + "," + str(-float(np.min(losses))) + "," + str(-float(np.sum(bestacc) / min(step+1, len(bestacc)))) + "," + str(-float(a_prev)) + "," + str(float(np.max(acc1))) + "," + str(len(elites_g1)) + "," + str(float(np.max(esmilated_losses) * 100)) + "," + str(idhk_surrogate) + "," + str(step / 5000) + "\n"
+    string += str(step) + "," + str(-float(np.min(losses__))) + "," + str(-float(np.min(losses))) + "," + str(-float(np.sum(bestacc) / min(step+1, len(bestacc)))) + "," + str(-float(a_prev)) + "," + str(float(np.max(acc1))) + "," + str(len(elites_g1)) + "," + str(float(np.max(esmilated_losses) * 100)) + "," + str(idhk_surrogate) + "," + str(step / 5000) + "\n<br/>"
 
     # ============================================================
     # SELECTION + REPRODUCTION (aligned for g1/g2/w/b)
