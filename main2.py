@@ -712,7 +712,7 @@ def score_logits_from_logits10(logits10: np.ndarray, label: int):
 # ============================================================
 # POPULATION
 # ============================================================
-MODELLEN = 40000
+MODELLEN = 10000
 POP = 20**2
 LAST_K = 10   # feature dim
 NUM_FUNCS = len_i0 + len_i1 + len_i2
